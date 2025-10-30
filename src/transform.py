@@ -4,9 +4,6 @@ import logging
 from pyspark.sql import SparkSession, Row
 from dotenv import load_dotenv
 
-# -----------------------------------------------------------
-# 1. Ortam ve log yapılandırması
-# -----------------------------------------------------------
 load_dotenv()
 
 logging.basicConfig(
@@ -22,11 +19,10 @@ logging.info(f"Working directory set to: {CURRENT_DIR}")
 
 RAW_DIR = os.path.join(CURRENT_DIR, "data/raw/fred")
 PROCESSED_DIR = os.path.join(CURRENT_DIR, "data/processed/fred")
+MODELED_DIR = os.path.join(CURRENT_DIR, "data/modeled/fred")
 os.makedirs(PROCESSED_DIR, exist_ok=True)
+os.makedirs(MODELED_DIR, exist_ok=True)
 
-# -----------------------------------------------------------
-# 2. Spark oturumu
-# -----------------------------------------------------------
 spark = (
     SparkSession.builder
     .appName("FRED_Transform_Pipeline")
@@ -34,14 +30,10 @@ spark = (
     .getOrCreate()
 )
 
-# -----------------------------------------------------------
-# 3. JSON'u açıp flatten eden fonksiyon
-# -----------------------------------------------------------
 def parse_fred_json(path):
     with open(path, "r") as f:
         data = json.load(f)
 
-    # Dosya adından seriyi çıkar (örneğin GDP_20251029_220531.json → GDP)
     file_name = os.path.basename(path)
     series_id = file_name.split("_")[0]
 
@@ -64,17 +56,13 @@ def parse_fred_json(path):
 
     return rows
 
-
-# -----------------------------------------------------------
-# 4. Tüm dosyaları dönüştür ve Parquet yaz
-# -----------------------------------------------------------
-def main():
+def transform_raw_to_processed():
     all_rows = []
     json_files = [f for f in os.listdir(RAW_DIR) if f.endswith(".json")]
 
     if not json_files:
         logging.warning("No JSON files found in data/raw/fred/")
-        return
+        return None
 
     for file in json_files:
         path = os.path.join(RAW_DIR, file)
@@ -84,14 +72,31 @@ def main():
 
     if not all_rows:
         logging.warning("No valid records found in any JSON file.")
-        return
+        return None
 
     df = spark.createDataFrame(all_rows)
     df.write.mode("overwrite").parquet(PROCESSED_DIR)
-    logging.info(f"✅ Saved processed data to: {PROCESSED_DIR}")
-    logging.info("🎯 All FRED datasets transformed successfully.")
+    logging.info(f"Saved processed data to: {PROCESSED_DIR}")
+    return df
 
+def pivot_processed_to_modeled(df):
+    logging.info("Pivoting processed data into wide format...")
+
+    pivoted = (
+        df.groupBy("date")
+          .pivot("series_id")
+          .avg("value")
+          .orderBy("date")
+    )
+
+    out_path = os.path.join(MODELED_DIR, "fred_pivoted.parquet")
+    pivoted.write.mode("overwrite").parquet(out_path)
+
+    logging.info(f"Pivoted dataset saved to: {out_path}")
+    logging.info("All FRED series transformed and merged successfully.")
 
 if __name__ == "__main__":
-    main()
+    df = transform_raw_to_processed()
+    if df is not None:
+        pivot_processed_to_modeled(df)
     spark.stop()
